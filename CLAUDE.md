@@ -151,7 +151,11 @@ GPTK and DXMT co-reside in one prefix, each pinned to its own runtime + override
   manual game is the pure forward choice; a Metal-backend failure surfaces the honest "switch to X" fallback
   message rather than auto-rerouting. Each runs in its own isolated bottle under the resolved backend's runtime
   (`BottleResolver.manual(_:backend:config:)`). The DXMT/DXVK runtimes install via Settings → DXMT / DXVK
-  (`runFullSetup` installs both best-effort so Automatic works out of the box).
+  (`runFullSetup` installs both best-effort so Automatic works out of the box). **The forced-msync rule is
+  SHARED-BOTTLE ONLY** (`makePlan(coResidentWithSteamClient:)`): an isolated prefix has no Steam client to stay
+  in sync with, so it honors `EnvFlags.syncMode` as the Sync picker in its own settings sheet shows it. The
+  parameter defaults to `true` because that is the *conservative* answer — over-applying msync costs a setting,
+  missing it in the shared bottle silently breaks Steamworks IPC.
 - When a backend isn't configured, GPTK degrades to wine's own wined3d (the baseline); a secondary backend
   refuses rather than mis-route. `GraphicsFallback` is backend-aware (surfaces a silent wined3d fallback).
 
@@ -170,6 +174,17 @@ against the real `4.0_beta_2` dmg. Two consequences worth knowing:
   `BackendConfig.gptkRuntimeName`, so a new install invalidates every reactive GPTK→DXMT/DXVK downgrade and
   those titles retry GPTK once. Intended — a new D3DMetal may fix them — but it is not silent-free: expect
   one GPTK attempt on titles that had settled onto a fallback.
+
+**GPTK's NGX shim must be ALIASED and SEEDED, or MetalFX upscaling is a dead switch (2026-08-05).** GPTK ships
+its DLSS→MetalFX bridge inert as `nvngx-on-metalfx.dll` — nothing resolves that name, so
+`D3DM_ENABLE_METALFX=1` has no provider behind it. Two steps, both required: `GraphicsLinker.activateNVNGX`
+aliases it to plain `nvngx` inside the wine tree (recreating the `.so`'s relative symlink; called BEFORE the
+witness early-return so an older overlay self-repairs), and `installGPTKPrefixLoaders` seeds `nvapi64.dll` +
+`nvngx.dll` into the prefix's `system32` — **`wineboot` runs against the BASE runtime, before GPTK's modules
+exist, so no fakedll placeholder is ever created for either name and the `=b` override would have nothing to
+bind** (the same trap `installDXMTPrefixLoaders` documents for `winemetal`; CrossOver's bottles carry 1 KB
+stubs for both). Because those files then persist in the SHARED prefix, the coherence rule extends to them:
+GPTK claims `nvapi64,nvngx=b`, DXMT and DXVK **disable** them (`=`). GPTK is 64-bit only, so `system32` only.
 
 **`EnvFlags.metalBackend` (`MetalBackendChoice = .auto | .metal4 | .metal3` → `D3DM_MTL4`)** picks which
 renderer D3DMetal's **DirectX 12** path translates through. GPTK 4.0b1 shipped Metal 4 as opt-in (`=1`);

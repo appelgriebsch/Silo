@@ -3,6 +3,47 @@
 > Updated every iteration. `CLAUDE.md` is the contract; this is the state.
 
 ## Now
+- **🔧 Three fixes ported from Dino0005' fork of Silo (2026-08-05; 520 tests green, zero warnings).** The
+  fork (branched 2026-07-15, so it predates the whole DXVK backend) was reviewed commit by commit; most of it
+  was rejected — an updater repointed at the fork, a script that lifts Wine out of an installed CrossOver.app
+  (constraint #8), a source-patching Python script, and an English-literals-as-keys IT localization that wraps
+  *dynamic* error strings in `LocalizedStringKey` (where a `%` in a path renders as a format specifier). Three
+  changes were real defects in Silo and were re-implemented to fit this codebase:
+  - **GPTK's MetalFX/NGX shim was never activated, so the "MetalFX upscaling" toggle did nothing.** GPTK
+    ships the module INERT as `nvngx-on-metalfx.dll` — nothing resolves that name, so `D3DM_ENABLE_METALFX=1`
+    had no NGX provider behind it. CrossOver's own GPTK tree carries the same module already renamed to plain
+    `nvngx.dll`. `GraphicsLinker.activateNVNGX` now aliases it inside the wine tree (recreating the `.so`'s
+    relative symlink, never dereferencing it), placed BEFORE the witness early-return so a runtime overlaid
+    by an older Silo self-repairs — the same shape `linkD3DMetalFramework` already uses.
+    - **The fork's version would have been a no-op here, and that only showed up on-device.** CrossOver's
+      Steam bottle carries 1 KB `nvapi64`/`nvngx` fakedll stubs in `system32`; ours cannot, because Silo boots
+      its prefixes against the BASE runtime and GPTK's modules only arrive later at first launch. Without a
+      name that resolves on the Windows search path the `=b` override has nothing to bind — the exact
+      `winemetal` trap `installDXMTPrefixLoaders` documents. Added `installGPTKPrefixLoaders` (system32 only;
+      GPTK is 64-bit) and extended the shared-prefix coherence rule: GPTK claims `nvapi64,nvngx=b`, DXMT and
+      DXVK **disable** them (`=`) so a seeded D3DMetal-backed native can never load under a non-GPTK launch.
+    - Verified against the REAL `GPTK-4.0_beta_2` artifact, not a fixture, via a new opt-in report case
+      (`SILO_BOTTLE_REPORT=1 Scripts/test.sh --filter nvngx`): shim name, alias, symlink target, prefix seed
+      and idempotency all confirmed on this machine.
+    - ⚠️ **Still unproven end-to-end**: that a game actually reports an NVIDIA adapter and that MetalFX
+      engages. Needs a real launch. Watch fullscreen too — activating the NGX shim registers a second
+      (fake NVIDIA) adapter, and `winemac.drv` only honours a display-mode change on the PRIMARY one, which
+      is the fork's stated reason for its always-on virtual desktop. If fullscreen regresses, the answer is
+      the existing reactive `needsVirtualDesktop` path, NOT the fork's blanket rule.
+  - **The Sync picker was silently inert for manual games.** `ManualGameSettingsSheet` embeds
+    `PerformanceFlagsSection`, which shows the Sync picker — but `makePlan` forced msync unconditionally. That
+    rule exists only to protect the shared Steam bottle's single wineserver; a manual game has its own
+    isolated prefix with no Steam client in it. `makePlan(coResidentWithSteamClient:)` now scopes it, and
+    defaults to `true` deliberately: over-applying msync costs a setting, missing it in the shared bottle
+    silently breaks Steamworks IPC, so a forgotten parameter fails safe.
+  - **The virtual-desktop fallback sized games to 1440x900.** It reused `SteamBottle.desktopGeometry` — a
+    verified CEF workaround for the Steam *client* window — so the path that exists to fix a display problem
+    was capping games at a fraction of a Retina panel. `DesktopGeometry.mainScreen()` (points ×
+    `backingScaleFactor`, resolved on the main actor so `makePlan` stays pure and AppKit-free) is now threaded
+    down. The desktop is also renamed `SiloGame`: `explorer` scopes a desktop by NAME, so a game sharing the
+    client's `Silo` desktop would join that window and inherit its size — making the geometry a no-op in the
+    shared bottle, the one place it matters most.
+
 - **🧱 DirectX 9 on Source-engine titles is blocked UPSTREAM, not by Silo (2026-08-04, measured).** After the
   DXVK runtime was reinstalled (the shipped one carried a STOCK MoltenVK — see below), DXVK finally creates
   its device, swapchain and presenter on a real game. Rendering still fails: SPIRV-Cross emits Metal that

@@ -298,7 +298,10 @@ public final class GameLibraryViewModel {
                 app: game, config: launchConfig, backend: backend, graphics: chosen,
                 wine: context.wineBinary, prefix: context.prefix,
                 logURL: logURL,
-                gameExe: exe)
+                gameExe: exe,
+                // Resolved HERE because this is the main actor: `NSScreen` can't be reached from the
+                // orchestrator (a nonisolated struct), and `makePlan` stays pure by taking the string.
+                desktopGeometry: DesktopGeometry.mainScreen())
             do {
                 _ = try await configStore.updateGame(appID: game.appID) { $0.lastPlayed = Date() }
                 setStatus("Launched \(game.name).")
@@ -476,7 +479,8 @@ public final class GameLibraryViewModel {
             // The resolved runtime is the chosen backend's variant; feed it to the orchestrator as the launch wine.
             try await orchestrator.launchManualGame(
                 game, backend: backend, graphics: context.graphics,
-                wine: context.wineBinary, prefix: context.prefix, logURL: paths.manualLog(game.id))
+                wine: context.wineBinary, prefix: context.prefix, logURL: paths.manualLog(game.id),
+                desktopGeometry: DesktopGeometry.mainScreen())
             do {
                 _ = try await configStore.updateManualGame(id: game.id) { $0.lastPlayed = Date() }
                 setStatus("Launched \(game.name).")

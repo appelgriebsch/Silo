@@ -62,7 +62,15 @@ public enum GraphicsBackend: String, Codable, Sendable, CaseIterable, Identifiab
     /// and DXVK's native `d3d9` loading under a GPTK/DXMT launch would run against the wine runtime's STOCK
     /// MoltenVK (DXVK's own is only put on the DYLD path for a `.dxvk` launch), which cannot create a device.
     /// Forcing `=b` here means those games get wine's own builtin d3d9 → wined3d, which is the correct answer.
-    /// - GPTK: the full D3DMetal set incl. d3d12 (GPTK covers DX12). `d3dcompiler_*` left native.
+    /// **The same coherence rule now covers `nvapi64`/`nvngx`**, which GPTK seeds into the shared prefix
+    /// (`GraphicsLinker.installGPTKPrefixLoaders`) and likewise never removes: GPTK claims them `=b` to load
+    /// its own MetalFX/NGX shim, and DXMT/DXVK **disable** them outright (`=`) rather than leave wine's
+    /// default load order to pick up a D3DMetal-backed native under a non-GPTK launch. Disabled is the honest
+    /// answer there — neither backend has an NGX provider, so a game correctly concludes there is no NVIDIA
+    /// adapter instead of half-binding one.
+    /// - GPTK: the full D3DMetal set incl. d3d12 (GPTK covers DX12), plus its NVIDIA shims `nvapi64`/`nvngx`
+    ///   (the latter only exists once `GraphicsLinker.activateNVNGX` has aliased GPTK's inert
+    ///   `nvngx-on-metalfx`). `d3dcompiler_*` left native.
     /// - DXMT: `d3d10core`/`d3d11`/`dxgi` + `winemetal` (its Metal bridge). D3D10/11 only — no d3d12/d3d9.
     /// - DXVK: `d3d9`/`d3d10core`/`d3d11`/`dxgi` forced **native** (`=n`) — stock upstream DXVK is a native DLL
     ///   set seeded into the prefix, not a wine builtin, so `=n` is what loads it. **Includes `dxgi`** — upstream
@@ -70,9 +78,9 @@ public enum GraphicsBackend: String, Codable, Sendable, CaseIterable, Identifiab
     ///   reuses wine's builtin dxgi). **No `winemetal`** — DXVK reaches Metal through `winevulkan` → MoltenVK.
     public var dllOverrides: String {
         switch self {
-        case .gptk: "d3d9,d3d10,d3d10_1,d3d10core,d3d11,d3d12,d3d12core,dxgi=b"
-        case .dxmt: "d3d9,d3d10,d3d10_1,d3d10core,d3d11,dxgi,winemetal=b"
-        case .dxvk: "d3d9,d3d10core,d3d11,dxgi=n"
+        case .gptk: "d3d9,d3d10,d3d10_1,d3d10core,d3d11,d3d12,d3d12core,dxgi,nvapi64,nvngx=b"
+        case .dxmt: "d3d9,d3d10,d3d10_1,d3d10core,d3d11,dxgi,winemetal=b;nvapi64,nvngx="
+        case .dxvk: "d3d9,d3d10core,d3d11,dxgi=n;nvapi64,nvngx="
         }
     }
 

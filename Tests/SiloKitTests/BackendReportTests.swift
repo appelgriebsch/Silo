@@ -162,4 +162,62 @@ struct BackendReportTests {
         print("  isLive(SteamBottle) = \(live)")
         print("  (true whenever Steam or a game is running; false otherwise — both are valid)")
     }
+
+    /// Runs the GPTK overlay against the REAL installed GPTK tree, into a throwaway runtime + prefix, and
+    /// prints what landed. The hermetic tests build their own fixture and so can only prove the code does
+    /// what it says — not that Apple's actual artifact has the shape the code assumes. This is the check
+    /// that the module is really named `nvngx-on-metalfx`, that its `.so` really is a symlink, and that the
+    /// alias + prefix seed come out the other side.
+    ///
+    /// Writes only into a temp dir it deletes; the real runtime and bottle are never touched.
+    @Test("report: the nvngx/MetalFX alias against the REAL installed GPTK",
+          .enabled(if: BackendReportTests.enabled))
+    func nvngxAliasAgainstRealGPTK() throws {
+        let paths = AppPaths.standard()
+        let fileManager = FileManager.default
+        print("\n=== GPTK nvngx alias (real artifact) ===")
+        guard let gptk = try? fileManager.contentsOfDirectory(
+                at: paths.runtimesDir, includingPropertiesForKeys: nil)
+                .map({ $0.appendingPathComponent("lib/wine/x86_64-windows") })
+                .first(where: { fileManager.fileExists(
+                    atPath: $0.appendingPathComponent("d3d11.dll").path)
+                    && fileManager.fileExists(atPath: $0.deletingLastPathComponent()
+                        .deletingLastPathComponent().appendingPathComponent("external").path) })
+        else {
+            print("  no GPTK install found under \(paths.runtimesDir.path) — nothing to check")
+            return
+        }
+        print("  source  \(gptk.path)")
+        print("  ships   \(((try? fileManager.contentsOfDirectory(atPath: gptk.path)) ?? []).sorted().joined(separator: " "))")
+
+        let scratch = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent("silo-nvngx-check-\(getpid())")
+        defer { try? fileManager.removeItem(at: scratch) }
+        for dir in ["wine/lib/wine/x86_64-windows", "wine/lib/wine/x86_64-unix", "wine/bin", "prefix"] {
+            try fileManager.createDirectory(
+                at: scratch.appendingPathComponent(dir), withIntermediateDirectories: true)
+        }
+        let wine = scratch.appendingPathComponent("wine/bin/wine64")
+        try Data("#!/bin/sh\n".utf8).write(to: wine)
+
+        let linker = GraphicsLinker()
+        try linker.overlayGPTK(wineBinary: wine, gptkLibDir: gptk)
+        try linker.installGPTKPrefixLoaders(prefix: scratch.appendingPathComponent("prefix"), gptkLibDir: gptk)
+
+        let win = scratch.appendingPathComponent("wine/lib/wine/x86_64-windows")
+        let unix = scratch.appendingPathComponent("wine/lib/wine/x86_64-unix")
+        let system32 = scratch.appendingPathComponent("prefix/drive_c/windows/system32")
+        let aliased = fileManager.contentsEqual(
+            atPath: win.appendingPathComponent("nvngx.dll").path,
+            andPath: gptk.appendingPathComponent("nvngx-on-metalfx.dll").path)
+        let soTarget = (try? fileManager.destinationOfSymbolicLink(
+            atPath: unix.appendingPathComponent("nvngx.so").path)) ?? "absent / not a symlink"
+        let seeded = ((try? fileManager.contentsOfDirectory(atPath: system32.path)) ?? []).sorted()
+        print("  runtime nvngx.dll aliased from the shim  \(aliased)")
+        print("  runtime nvngx.so →  \(soTarget)")
+        print("  prefix system32     \(seeded.joined(separator: " "))")
+        try linker.overlayGPTK(wineBinary: wine, gptkLibDir: gptk)   // idempotency on the real tree
+        let survived = fileManager.fileExists(atPath: win.appendingPathComponent("nvngx.dll").path)
+        print("  second overlay left nvngx.dll in place   \(survived)")
+    }
 }

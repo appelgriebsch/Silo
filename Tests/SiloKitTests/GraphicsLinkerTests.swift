@@ -12,7 +12,10 @@ struct GraphicsLinkerTests {
     /// Each module gets a PE `.dll` + a relative-symlink `.so` (GPTK's real layout); `lib/external` holds
     /// `libd3dshared.dylib` + a `D3DMetal.framework` directory.
     @discardableResult
-    private func makeGPTK(_ tmp: TempDir, modules: [String] = ["d3d11.dll", "d3d10.dll", "nvapi64.dll"]) throws -> URL {
+    private func makeGPTK(
+        _ tmp: TempDir,
+        modules: [String] = ["d3d11.dll", "d3d10.dll", "nvapi64.dll", "nvngx-on-metalfx.dll"]
+    ) throws -> URL {
         let win = try tmp.makeDir("gptk/lib/wine/x86_64-windows")
         let unix = try tmp.makeDir("gptk/lib/wine/x86_64-unix")
         try tmp.makeDir("gptk/lib/external/D3DMetal.framework")
@@ -168,6 +171,102 @@ struct GraphicsLinkerTests {
         try linker.overlayGPTK(wineBinary: wine, gptkLibDir: gptkLibDir)
         #expect(try FileManager.default.destinationOfSymbolicLink(atPath: link.path)
             == "../../external/D3DMetal.framework")
+    }
+
+    // MARK: - GPTK's NGX / MetalFX shim
+
+    @Test("overlayGPTK aliases GPTK's inert nvngx-on-metalfx to the plain nvngx name games resolve")
+    func overlayActivatesNVNGX() throws {
+        let tmp = try TempDir(); defer { tmp.cleanup() }
+        let gptkLibDir = try makeGPTK(tmp)
+        let wine = try makeWine(tmp)
+        let wineLib = wine.deletingLastPathComponent().deletingLastPathComponent().appendingPathComponent("lib")
+
+        try linker.overlayGPTK(wineBinary: wine, gptkLibDir: gptkLibDir)
+
+        // The PE alias is a real copy of the shim GPTK shipped.
+        let nvngx = wineLib.appendingPathComponent("wine/x86_64-windows/nvngx.dll")
+        #expect(FileManager.default.contentsEqual(
+            atPath: nvngx.path,
+            andPath: gptkLibDir.appendingPathComponent("nvngx-on-metalfx.dll").path))
+        // The unix side stays a RELATIVE SYMLINK — dereferencing it into a standalone dylib would break the
+        // @loader_path lookup that finds D3DMetal, exactly as it would for the d3d modules.
+        let so = wineLib.appendingPathComponent("wine/x86_64-unix/nvngx.so")
+        #expect((try so.resourceValues(forKeys: [.isSymbolicLinkKey]).isSymbolicLink) == true)
+        #expect(try FileManager.default.destinationOfSymbolicLink(atPath: so.path)
+            == "../../external/libd3dshared.dylib")
+        // The shim keeps its own name too — the alias is an addition, not a rename.
+        #expect(FileManager.default.fileExists(
+            atPath: wineLib.appendingPathComponent("wine/x86_64-windows/nvngx-on-metalfx.dll").path))
+    }
+
+    /// The alias must survive the witness early-return, or a runtime overlaid by an older Silo would sail
+    /// past the module copy and never get it — the same failure mode the D3DMetal.framework link had.
+    @Test("overlayGPTK self-repairs a runtime whose modules are in place but whose nvngx alias is missing")
+    func overlaySelfRepairsMissingNVNGXAlias() throws {
+        let tmp = try TempDir(); defer { tmp.cleanup() }
+        let gptkLibDir = try makeGPTK(tmp)
+        let wine = try makeWine(tmp)
+        try linker.overlayGPTK(wineBinary: wine, gptkLibDir: gptkLibDir)
+
+        let winDir = wine.deletingLastPathComponent().deletingLastPathComponent()
+            .appendingPathComponent("lib/wine/x86_64-windows")
+        let unixDir = wine.deletingLastPathComponent().deletingLastPathComponent()
+            .appendingPathComponent("lib/wine/x86_64-unix")
+        try FileManager.default.removeItem(at: winDir.appendingPathComponent("nvngx.dll"))
+        try FileManager.default.removeItem(at: unixDir.appendingPathComponent("nvngx.so"))
+
+        try linker.overlayGPTK(wineBinary: wine, gptkLibDir: gptkLibDir)   // witness still matches
+        #expect(FileManager.default.fileExists(atPath: winDir.appendingPathComponent("nvngx.dll").path))
+        #expect(FileManager.default.fileExists(atPath: unixDir.appendingPathComponent("nvngx.so").path))
+    }
+
+    @Test("a GPTK that ships no NGX shim simply gets no alias — nothing invented, nothing thrown")
+    func overlayWithoutNVNGXShim() throws {
+        let tmp = try TempDir(); defer { tmp.cleanup() }
+        let gptkLibDir = try makeGPTK(tmp, modules: ["d3d11.dll", "nvapi64.dll"])
+        let wine = try makeWine(tmp)
+
+        try linker.overlayGPTK(wineBinary: wine, gptkLibDir: gptkLibDir)
+
+        let winDir = wine.deletingLastPathComponent().deletingLastPathComponent()
+            .appendingPathComponent("lib/wine/x86_64-windows")
+        #expect(!FileManager.default.fileExists(atPath: winDir.appendingPathComponent("nvngx.dll").path))
+        #expect(FileManager.default.fileExists(atPath: winDir.appendingPathComponent("nvapi64.dll").path))
+    }
+
+    @Test("installGPTKPrefixLoaders seeds nvapi64 + the plain-named nvngx into the prefix's system32")
+    func gptkPrefixLoaders() throws {
+        let tmp = try TempDir(); defer { tmp.cleanup() }
+        let gptkLibDir = try makeGPTK(tmp)
+        let prefix = try tmp.makeDir("bottle")   // system32 is created by the seed itself
+
+        try linker.installGPTKPrefixLoaders(prefix: prefix, gptkLibDir: gptkLibDir)
+
+        let system32 = prefix.appendingPathComponent("drive_c/windows/system32")
+        // nvapi64 keeps its name; the shim lands under the plain name wine has to resolve.
+        #expect(FileManager.default.contentsEqual(
+            atPath: system32.appendingPathComponent("nvapi64.dll").path,
+            andPath: gptkLibDir.appendingPathComponent("nvapi64.dll").path))
+        #expect(FileManager.default.contentsEqual(
+            atPath: system32.appendingPathComponent("nvngx.dll").path,
+            andPath: gptkLibDir.appendingPathComponent("nvngx-on-metalfx.dll").path))
+        // GPTK is 64-bit only — no syswow64 counterpart, unlike the dual-ABI DXMT/DXVK seeds.
+        #expect(!FileManager.default.fileExists(
+            atPath: prefix.appendingPathComponent("drive_c/windows/syswow64/nvngx.dll").path))
+
+        try linker.installGPTKPrefixLoaders(prefix: prefix, gptkLibDir: gptkLibDir)   // idempotent
+        #expect(FileManager.default.fileExists(atPath: system32.appendingPathComponent("nvngx.dll").path))
+    }
+
+    @Test("installGPTKPrefixLoaders throws sourceMissing when GPTK's module dir does not exist")
+    func gptkPrefixLoadersSourceMissing() throws {
+        let tmp = try TempDir(); defer { tmp.cleanup() }
+        let prefix = try tmp.makeDir("bottle")
+        let missing = tmp.url.appendingPathComponent("nope/lib/wine/x86_64-windows")
+        #expect(throws: GraphicsLinker.LinkError.sourceMissing(missing)) {
+            try linker.installGPTKPrefixLoaders(prefix: prefix, gptkLibDir: missing)
+        }
     }
 
     @Test("overlayGPTK throws sourceMissing when GPTK's module dir does not exist")

@@ -44,6 +44,14 @@ public struct LaunchOrchestrator: Sendable {
     /// - Parameter wine: the resolved launch binary — the per-backend variant runtime `BottleResolver`
     ///   hands back (the DXMT clone, or the base for GPTK). Defaults to `backend.wineBinaryPath` when a
     ///   caller has no variant to inject, so `backend` still gates the graphics overrides via `libDir(for:)`.
+    /// - Parameter coResidentWithSteamClient: whether `prefix` is the SHARED Steam bottle, where a running
+    ///   Steam client serves Steamworks over the one wineserver. Defaults to `true` because that is the
+    ///   **conservative** answer, not the common one: over-applying msync to an isolated prefix costs a user
+    ///   setting, whereas under-applying it in the shared bottle splits the wineserver and silently breaks
+    ///   Steamworks IPC. A new launch path that forgets this parameter therefore fails safe.
+    /// - Parameter desktopGeometry: `"<width>x<height>"` in real screen pixels (see `DesktopGeometry`) for
+    ///   the virtual desktop, when one is used. Nil falls back to `fallbackGameDesktopGeometry` — this stays
+    ///   a plain `String?` rather than reaching for `NSScreen` here so `makePlan` remains pure and testable.
     public static func makePlan(
         config: GameConfig,
         backend: BackendConfig,
@@ -54,7 +62,9 @@ public struct LaunchOrchestrator: Sendable {
         prefix: URL,
         logURL: URL,
         steamArguments: [String] = [],
-        virtualDesktop: Bool = false
+        virtualDesktop: Bool = false,
+        desktopGeometry: String? = nil,
+        coResidentWithSteamClient: Bool = true
     ) throws -> LaunchPlan {
         guard let wine = wine ?? backend.wineBinaryPath else {
             throw LaunchError.wineNotConfigured
@@ -72,7 +82,13 @@ public struct LaunchOrchestrator: Sendable {
         // This deliberately overrides whatever EnvFlags.syncMode (and any WINEMSYNC/WINEESYNC in
         // envFlags.extra) produced — an esync/none per-game override would split the wineserver and
         // silently break Steamworks IPC, the exact failure the shared bottle exists to avoid.
-        Silo.enforceMsync(&environment)
+        //
+        // ONLY in the shared bottle, though. A manual game gets its OWN isolated prefix with no Steam
+        // client in it, so there is no shared wineserver to protect — and forcing msync there silently
+        // discarded the Sync picker that `PerformanceFlagsSection` shows in the manual game's own settings
+        // sheet. A control that visibly does nothing is worse than no control, so the isolated case now
+        // honors `EnvFlags.syncMode` exactly as the user set it.
+        if coResidentWithSteamClient { Silo.enforceMsync(&environment) }
 
         // The active backend's translated d3d modules are overlaid into the wine runtime's own lib/wine
         // tree (GraphicsLinker.overlayGPTK / overlayDXMT), so wine loads them directly — no WINEDLLPATH.
@@ -121,7 +137,8 @@ public struct LaunchOrchestrator: Sendable {
             // `-game dab` the game cannot start without, rather than replacing it. Anything the user already
             // typed WINS and is not re-added (see `mergeArguments`).
             arguments: Self.invocation(for: gameExe,
-                                       virtualDesktop: config.needsVirtualDesktop || virtualDesktop)
+                                       virtualDesktop: config.needsVirtualDesktop || virtualDesktop,
+                                       geometry: desktopGeometry)
                 + Self.mergeArguments(steam: steamArguments, user: config.customArgs),
             environment: environment,
             // A game may resolve its data relative to a "start in" dir that isn't the exe's own folder
@@ -131,11 +148,28 @@ public struct LaunchOrchestrator: Sendable {
         )
     }
 
+    /// Wine desktop name for a GAME's virtual desktop — deliberately NOT the `Silo` desktop
+    /// `SteamBottle.launchSteam` runs the Steam client in. `explorer` scopes a desktop by NAME, so a game
+    /// launched under `/desktop=Silo,…` while the client is up would join the client's EXISTING desktop and
+    /// inherit its size, making the geometry below a no-op in the shared bottle — the one place it matters
+    /// most. A distinct name gets the game its own desktop at its own size. Reusing this one name across
+    /// sequential game launches is fine: Silo never runs two games at once in a bottle.
+    static let gameDesktopName = "SiloGame"
+
+    /// Geometry for a game's virtual desktop when the caller couldn't resolve the real screen (a headless
+    /// test, or an off-main call). Explicitly NOT `SteamBottle.desktopGeometry`: that 1440x900 is a verified
+    /// workaround for the Steam client's CEF window, and inheriting it for a GAME capped it at a fraction of
+    /// a Retina panel — the fallback was making the display worse in the very path meant to fix it.
+    static let fallbackGameDesktopGeometry = "1920x1080"
+
     /// The wine argument vector that runs `target`. Wine can exec a PE image (`.exe`) directly, but a
     /// Windows Installer package (`.msi`) is data, not a PE — it must be handed to the bottle's builtin
     /// `msiexec /i`. Everything else runs directly. (Steam/manual game targets are always `.exe`; only the
     /// "run installer" path feeds an `.msi` here.)
-    static func invocation(for target: URL, virtualDesktop: Bool = false) -> [String] {
+    /// - Parameter geometry: the desktop size in real screen pixels; nil uses `fallbackGameDesktopGeometry`.
+    static func invocation(
+        for target: URL, virtualDesktop: Bool = false, geometry: String? = nil
+    ) -> [String] {
         // `explorer /desktop=` runs the target inside a wine-managed desktop window. Wine then satisfies a
         // display-mode change ITSELF instead of asking macOS for a mode it may not have — which is the whole
         // fix for a game that saved a resolution this display cannot produce (see
@@ -147,7 +181,8 @@ public struct LaunchOrchestrator: Sendable {
             base = [target.path]
         }
         guard virtualDesktop else { return base }
-        return ["explorer", "/desktop=Silo,\(SteamBottle.desktopGeometry)"] + base
+        let size = (geometry?.isEmpty == false ? geometry! : fallbackGameDesktopGeometry)
+        return ["explorer", "/desktop=\(gameDesktopName),\(size)"] + base
     }
 
     /// Map a unix path to its `Z:` DOS equivalent (wine's default unix-root drive), e.g.
@@ -163,11 +198,14 @@ public struct LaunchOrchestrator: Sendable {
     /// Steam client serves Steamworks. Links graphics into the shared prefix, writes `steam_appid.txt`,
     /// and spawns with `WINEPREFIX` forced to `prefix`. The prefix must already be provisioned (by
     /// `SteamBottle`). Returns the child PID.
+    /// - Parameter desktopGeometry: forwarded to `makePlan` — the real screen's pixel size, resolved by the
+    ///   caller (`DesktopGeometry.mainScreen()` on the main actor). Only consulted when the game actually
+    ///   runs in a virtual desktop.
     @discardableResult
     public func launchInBottle(
         app: SteamApp, config: GameConfig, backend: BackendConfig,
         graphics: GraphicsBackend, wine: URL? = nil, prefix: URL, logURL: URL,
-        gameExe: URL? = nil
+        gameExe: URL? = nil, desktopGeometry: String? = nil
     ) async throws -> Int32 {
         guard let launchWine = wine ?? backend.wineBinaryPath else { throw LaunchError.wineNotConfigured }
         // Reuse the exe the caller already resolved (the VM resolves it once to pick the backend), else
@@ -189,7 +227,9 @@ public struct LaunchOrchestrator: Sendable {
             gameExe: gameExe, prefix: prefix, logURL: logURL,
             steamArguments: SteamAppInfo.windowsLaunch(steamRoot: app.libraryPath,
                                                        appID: app.appID)?.arguments ?? [],
-            virtualDesktop: GraphicsFallback.requestedUnavailableDisplayMode(priorLog))
+            virtualDesktop: GraphicsFallback.requestedUnavailableDisplayMode(priorLog),
+            desktopGeometry: desktopGeometry,
+            coResidentWithSteamClient: true)   // the shared Steam bottle — msync is mandatory here
         return try await spawn(plan)
     }
 
@@ -197,10 +237,12 @@ public struct LaunchOrchestrator: Sendable {
 
     /// Launch a user-added non-Steam game in the bottle prefix under GPTK. No Steam presence (these don't
     /// use Steamworks) and no Steam client requirement — just wine + the absolute `.exe` path. Returns PID.
+    /// - Parameter desktopGeometry: forwarded to `makePlan` — see `launchInBottle`.
     @discardableResult
     public func launchManualGame(
         _ game: ManualGame, backend: BackendConfig,
-        graphics: GraphicsBackend, wine: URL? = nil, prefix: URL, logURL: URL
+        graphics: GraphicsBackend, wine: URL? = nil, prefix: URL, logURL: URL,
+        desktopGeometry: String? = nil
     ) async throws -> Int32 {
         guard let launchWine = wine ?? backend.wineBinaryPath else { throw LaunchError.wineNotConfigured }
         guard FileManager.default.fileExists(atPath: game.executablePath.path) else {
@@ -210,7 +252,10 @@ public struct LaunchOrchestrator: Sendable {
         try linkGraphics(backendConfig: backend, graphics: graphics, wine: launchWine, prefix: prefix)
         let plan = try Self.makePlan(
             config: game.gameConfig, backend: backend, graphics: graphics, wine: launchWine,
-            gameExe: game.executablePath, workingDirectory: game.workingDirectory, prefix: prefix, logURL: logURL)
+            gameExe: game.executablePath, workingDirectory: game.workingDirectory, prefix: prefix,
+            logURL: logURL, desktopGeometry: desktopGeometry,
+            // Its OWN isolated prefix — no Steam client, no shared wineserver, so the Sync picker stands.
+            coResidentWithSteamClient: false)
         return try await spawn(plan)
     }
 
@@ -230,7 +275,11 @@ public struct LaunchOrchestrator: Sendable {
         try linkGraphics(backendConfig: backend, graphics: graphics, wine: wine, prefix: prefix)
         let plan = try Self.makePlan(
             config: GameConfig(appID: 0, presence: .none), backend: backend, graphics: graphics,
-            wine: wine, gameExe: exe, prefix: prefix, logURL: logURL)
+            wine: wine, gameExe: exe, prefix: prefix, logURL: logURL,
+            // Only ever a MANUAL game's own bottle (`GameLibraryViewModel.runInstaller(_:forBottle:)`
+            // resolves `paths.manualBottle(id)`); the Steam bottle's own component installers go through
+            // `SteamBottle.provisionComponents`, not here.
+            coResidentWithSteamClient: false)
         writeLogHeader(for: plan)
         let result = try await runner.run(
             executable: plan.executable, arguments: plan.arguments,
@@ -342,16 +391,21 @@ public struct LaunchOrchestrator: Sendable {
     }
 
     /// Wire up the selected backend's graphics translation before launch: overlay D3DMetal (GPTK) or DXMT
-    /// into the wine RUNTIME (idempotent, shared by every co-resident game in that backend's bottle). For
-    /// DXMT it ALSO seeds `winemetal.dll` into the game `prefix` (see `installDXMTPrefixLoaders` — wine can't
-    /// load the winemetal builtin otherwise). Skipped when that backend is unconfigured — the game then falls
-    /// back to wine's own wined3d.
+    /// into the wine RUNTIME (idempotent, shared by every co-resident game in that backend's bottle). Both
+    /// Metal backends ALSO seed the prefix with the modules wine can't otherwise resolve by name: DXMT's
+    /// `winemetal.dll` (see `installDXMTPrefixLoaders`) and GPTK's `nvapi64`/`nvngx` (see
+    /// `installGPTKPrefixLoaders`). Skipped when that backend is unconfigured — the game then falls back to
+    /// wine's own wined3d.
     private func linkGraphics(
         backendConfig: BackendConfig, graphics: GraphicsBackend, wine: URL, prefix: URL
     ) throws {
         guard let libDir = backendConfig.libDir(for: graphics) else { return }
         switch graphics {
-        case .gptk: try linker.overlayGPTK(wineBinary: wine, gptkLibDir: libDir)
+        case .gptk:
+            try linker.overlayGPTK(wineBinary: wine, gptkLibDir: libDir)
+            // Seed nvapi64/nvngx into the prefix so wine can resolve those names at all — without it the
+            // `=b` override has nothing to bind (see `installGPTKPrefixLoaders`; same trap as winemetal).
+            try linker.installGPTKPrefixLoaders(prefix: prefix, gptkLibDir: libDir)
         case .dxmt:
             try linker.overlayDXMT(wineBinary: wine, dxmtLibDir: libDir)
             try linker.installDXMTPrefixLoaders(prefix: prefix, dxmtLibDir: libDir)

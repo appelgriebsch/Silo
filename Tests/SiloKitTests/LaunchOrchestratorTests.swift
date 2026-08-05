@@ -105,6 +105,45 @@ struct MakePlanTests {
         #expect(plan.environment["MTL_HUD_ENABLED"] == "1")  // non-sync extras still survive
     }
 
+    /// The co-residency rule is a property of the SHARED prefix, not of launching. A manual game gets its
+    /// own isolated bottle with no Steam client in it — nothing to stay in sync with — yet its settings
+    /// sheet shows the same Sync picker (`PerformanceFlagsSection`). Overriding it there made that control
+    /// silently inert.
+    @Test("An ISOLATED prefix honors the Sync picker — there's no co-resident client to protect")
+    func isolatedPrefixHonorsTheSyncPicker() throws {
+        var cfg = GameConfig(appID: 0)
+        cfg.envFlags = EnvFlags(syncMode: .esync)
+        let plan = try LaunchOrchestrator.makePlan(
+            config: cfg, backend: backend(), gameExe: gameExe, prefix: prefix, logURL: log,
+            coResidentWithSteamClient: false)
+        #expect(plan.environment["WINEESYNC"] == "1")
+        #expect(plan.environment["WINEMSYNC"] == nil)
+    }
+
+    @Test("An isolated prefix can also select no sync at all, which the shared bottle can never allow")
+    func isolatedPrefixHonorsNoSync() throws {
+        var cfg = GameConfig(appID: 0)
+        cfg.envFlags = EnvFlags(syncMode: .none)
+        let plan = try LaunchOrchestrator.makePlan(
+            config: cfg, backend: backend(), gameExe: gameExe, prefix: prefix, logURL: log,
+            coResidentWithSteamClient: false)
+        #expect(plan.environment["WINEMSYNC"] == nil)
+        #expect(plan.environment["WINEESYNC"] == nil)
+    }
+
+    /// The default must be the CONSERVATIVE answer, not the common one: over-applying msync to an isolated
+    /// prefix costs a setting, while missing it in the shared bottle silently breaks Steamworks IPC. A new
+    /// launch path that forgets the parameter has to fail that way round.
+    @Test("Omitting the co-residency parameter defaults to enforcing msync (fails safe)")
+    func coResidencyDefaultsToEnforced() throws {
+        var cfg = GameConfig(appID: 220)
+        cfg.envFlags = EnvFlags(syncMode: .esync)
+        let plan = try LaunchOrchestrator.makePlan(
+            config: cfg, backend: backend(), gameExe: gameExe, prefix: prefix, logURL: log)
+        #expect(plan.environment["WINEMSYNC"] == "1")
+        #expect(plan.environment["WINEESYNC"] == nil)
+    }
+
     @Test("GPTK plan with GPTK configured: D3DMetal resolves from the RUNTIME's lib/external, no WINEDLLPATH")
     func gptkPlanD3DMetalWiring() throws {
         let cfg = GameConfig(appID: 220)
@@ -121,7 +160,7 @@ struct MakePlanTests {
         // Modules live in wine's own lib/wine now (overlaid), so there is NO WINEDLLPATH; the translated
         // d3d modules are just forced to builtin so GPTK's overlaid versions win.
         #expect(plan.environment["WINEDLLPATH"] == nil)
-        #expect(plan.environment["WINEDLLOVERRIDES"] == "d3d9,d3d10,d3d10_1,d3d10core,d3d11,d3d12,d3d12core,dxgi=b")
+        #expect(plan.environment["WINEDLLOVERRIDES"] == "d3d9,d3d10,d3d10_1,d3d10core,d3d11,d3d12,d3d12core,dxgi,nvapi64,nvngx=b")
     }
 
     @Test("DXMT plan: winemetal/d3d builtin overrides, and NO lib/external DYLD path (winemetal links system Metal)")
@@ -133,7 +172,7 @@ struct MakePlanTests {
             config: cfg, backend: b, graphics: .dxmt, gameExe: gameExe, prefix: prefix, logURL: log)
 
         // DXMT forces ITS module set (incl. its winemetal Metal bridge) to builtin — D3D10/11 only, no d3d12.
-        #expect(plan.environment["WINEDLLOVERRIDES"] == "d3d9,d3d10,d3d10_1,d3d10core,d3d11,dxgi,winemetal=b")
+        #expect(plan.environment["WINEDLLOVERRIDES"] == "d3d9,d3d10,d3d10_1,d3d10core,d3d11,dxgi,winemetal=b;nvapi64,nvngx=")
         // Unlike GPTK, DXMT ships no framework in lib/external — winemetal.so links the system Metal.framework
         // — so makePlan must NOT prepend /w/lib/external; the base bundled-deps DYLD path is left intact.
         #expect(plan.environment["DYLD_FALLBACK_FRAMEWORK_PATH"] == nil)
@@ -150,7 +189,7 @@ struct MakePlanTests {
             config: cfg, backend: b, graphics: .dxvk, gameExe: gameExe, prefix: prefix, logURL: log)
 
         // Native DXVK forces ITS d3d9/10core/11 + its own dxgi to native (=n) — the sole DirectX 9 path.
-        #expect(plan.environment["WINEDLLOVERRIDES"] == "d3d9,d3d10core,d3d11,dxgi=n")
+        #expect(plan.environment["WINEDLLOVERRIDES"] == "d3d9,d3d10core,d3d11,dxgi=n;nvapi64,nvngx=")
         // The Vulkan driver is picked by dyld NAME lookup (an absolute CX_LIBVULKAN is ignored — verified
         // on-device), so DXVK's OWN MoltenVK dir must LEAD the fallback path, ahead of wine's bundled stock
         // one (which can't create a D3D device at any feature level).
@@ -222,7 +261,7 @@ struct MakePlanTests {
         let plan = try LaunchOrchestrator.makePlan(
             config: cfg, backend: b, gameExe: gameExe, prefix: prefix, logURL: log)
         // GPTK's d3d overrides are APPENDED (semicolon-joined), not overwriting the user's.
-        #expect(plan.environment["WINEDLLOVERRIDES"] == "winemenubuilder.exe=d;d3d9,d3d10,d3d10_1,d3d10core,d3d11,d3d12,d3d12core,dxgi=b")
+        #expect(plan.environment["WINEDLLOVERRIDES"] == "winemenubuilder.exe=d;d3d9,d3d10,d3d10_1,d3d10core,d3d11,d3d12,d3d12core,dxgi,nvapi64,nvngx=b")
     }
 
     @Test("Perf env-flags (MetalHUD / MetalFX / DXR / AVX) propagate into the launch plan's environment")
@@ -459,7 +498,7 @@ struct LaunchPipelineTests {
         #expect(try String(contentsOf: overlaid, encoding: .utf8) == "DXMT-PE")
 
         let spawn = try #require(fake.invocations.last { $0.detached })
-        #expect(spawn.environment["WINEDLLOVERRIDES"] == "d3d9,d3d10,d3d10_1,d3d10core,d3d11,dxgi,winemetal=b")
+        #expect(spawn.environment["WINEDLLOVERRIDES"] == "d3d9,d3d10,d3d10_1,d3d10core,d3d11,dxgi,winemetal=b;nvapi64,nvngx=")
         #expect(spawn.environment["WINEPREFIX"] == prefix.path)
     }
 

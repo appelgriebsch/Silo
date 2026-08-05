@@ -37,8 +37,41 @@ struct VirtualDesktopFallbackTests {
         #expect(plain == [exe.path])
         let wrapped = LaunchOrchestrator.invocation(for: exe, virtualDesktop: true)
         #expect(wrapped.first == "explorer")
-        #expect(wrapped.contains { $0.hasPrefix("/desktop=Silo,") })
+        #expect(wrapped.contains { $0.hasPrefix("/desktop=SiloGame,") })
         #expect(wrapped.last == exe.path)      // the game stays the final argument
+    }
+
+    /// `explorer` scopes a desktop by NAME. If a game reused the Steam client's `Silo` desktop it would
+    /// join that existing window and silently inherit its 1440x900 — in the shared bottle, where the client
+    /// is always up, that would make the resolved geometry below a no-op.
+    @Test("a game's desktop is a DIFFERENT desktop from the Steam client's, so it can have its own size")
+    func gameDesktopIsNotTheSteamClientDesktop() {
+        #expect(LaunchOrchestrator.gameDesktopName != "Silo")
+        #expect(LaunchOrchestrator.fallbackGameDesktopGeometry != SteamBottle.desktopGeometry)
+    }
+
+    @Test("the real screen's pixel geometry is what the desktop is sized to, with a sane fallback")
+    func usesResolvedGeometry() {
+        let exe = URL(fileURLWithPath: "/games/Tekken 8/tekken.exe")
+        let retina = LaunchOrchestrator.invocation(
+            for: exe, virtualDesktop: true, geometry: "3024x1964")
+        #expect(retina.contains("/desktop=SiloGame,3024x1964"))
+
+        // No screen to ask (headless / off-main): the fallback stands in — and it is deliberately NOT the
+        // Steam client's CEF-workaround size, which would cap the game at a fraction of a Retina panel.
+        for missing in [nil, ""] as [String?] {
+            let fallback = LaunchOrchestrator.invocation(
+                for: exe, virtualDesktop: true, geometry: missing)
+            #expect(fallback.contains(
+                "/desktop=SiloGame,\(LaunchOrchestrator.fallbackGameDesktopGeometry)"))
+        }
+    }
+
+    @Test("geometry is irrelevant when the game runs rootless — no explorer wrapper at all")
+    func geometryIgnoredWithoutVirtualDesktop() {
+        let exe = URL(fileURLWithPath: "/games/Tekken 8/tekken.exe")
+        let rootless = LaunchOrchestrator.invocation(for: exe, geometry: "3024x1964")
+        #expect(rootless == [exe.path])
     }
 }
 

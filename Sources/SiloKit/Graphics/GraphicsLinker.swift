@@ -21,11 +21,20 @@ public struct GraphicsLinker: Sendable {
 
     /// The modules GPTK ships in its `lib/wine` tree — and only these: the Direct3D/DXGI translation
     /// (`d3d*`, `dxgi*`) plus the NVIDIA shims that back MetalFX upscaling (`nv*` — `nvapi64`,
-    /// `nvngx-on-metalfx`). Used to select what to overlay, and as a guard so we never clobber an
-    /// unrelated wine module should a future GPTK ship more than its d3d tree.
+    /// `nvngx-on-metalfx`, the latter also aliased to its plain name by `activateNVNGX`). Used to select
+    /// what to overlay, and as a guard so we never clobber an unrelated wine module should a future GPTK
+    /// ship more than its d3d tree.
     static func isGPTKModule(_ name: String) -> Bool {
         isOverlayModule(name, prefixes: ["d3d", "dxgi", "nv"])
     }
+
+    /// GPTK ships its NGX (DLSS→MetalFX) shim under a suffixed, INERT name; nothing looks that name up.
+    /// `activateNVNGX` aliases it to the plain `nvngx` a game — or D3DMetal's own `nvapi64` — actually
+    /// resolves. Apple's own tree carries `nvngx-on-metalfx.dll`/`.so`; CrossOver's shipped GPTK tree
+    /// carries the same module already renamed to plain `nvngx.dll`, which is what makes their MetalFX
+    /// path live.
+    static let nvngxShimStem = "nvngx-on-metalfx"
+    static let nvngxStem = "nvngx"
 
     /// The shared module filter both backends parameterize: a `.dll`/`.so` whose basename starts with one
     /// of that backend's module prefixes — selects what to overlay AND guards against clobbering an
@@ -72,6 +81,10 @@ public struct GraphicsLinker: Sendable {
         // below, which would otherwise skip a runtime whose modules are in place but whose framework link
         // is missing (the silent-wined3d-fallback regression).
         try linkD3DMetalFramework(unixDir: wineUnixDir, externalDir: wineExternal)
+        // Same reason, same placement: a runtime already carrying this GPTK's modules would sail past the
+        // witness check below and never get the alias. Both calls are needed — this one repairs an existing
+        // overlay, the one after `copyModules` handles a fresh runtime where the shim didn't exist yet.
+        try activateNVNGX(winDir: wineWinDir, unixDir: wineUnixDir)
 
         // Idempotent: if a witness module is already byte-identical, the runtime carries THIS GPTK — skip.
         if witnessMatches(modules, in: wineWinDir) { return }
@@ -86,6 +99,78 @@ public struct GraphicsLinker: Sendable {
         // Now that D3DMetal.framework is in lib/external, link it into the unix-modules dir (the pre-witness
         // call above was a no-op on a fresh runtime where the framework didn't exist yet).
         try linkD3DMetalFramework(unixDir: wineUnixDir, externalDir: wineExternal)
+        // Likewise: the shim only just landed in the tree, so alias it now that it exists.
+        try activateNVNGX(winDir: wineWinDir, unixDir: wineUnixDir)
+    }
+
+    /// Alias GPTK's NGX shim to the plain `nvngx` name inside the **wine runtime** tree, for both the PE
+    /// `.dll` and its unix `.so`.
+    ///
+    /// GPTK ships the module as `nvngx-on-metalfx`, which nothing resolves — so `D3DM_ENABLE_METALFX=1`
+    /// (what the per-game "MetalFX upscaling" toggle sets) has no NGX provider behind it and the switch does
+    /// nothing. CrossOver's own GPTK tree ships this module pre-renamed to plain `nvngx.dll`.
+    ///
+    /// Aliased from what's already IN the runtime tree rather than copied from GPTK, for two reasons: it
+    /// self-repairs a runtime overlaid before this existed (GPTK may since have been removed), and it lets
+    /// `replace` recreate the `.so`'s **relative symlink** into `lib/external` instead of dereferencing it —
+    /// dereferencing would break the `@loader_path`-relative D3DMetal lookup exactly as it would for the d3d
+    /// modules. Idempotent, and a no-op while the shim is absent — the same shape as `linkD3DMetalFramework`.
+    private func activateNVNGX(winDir: URL, unixDir: URL) throws {
+        for (dir, ext) in [(winDir, "dll"), (unixDir, "so")] {
+            let shim = dir.appendingPathComponent("\(Self.nvngxShimStem).\(ext)")
+            guard isSymlink(shim) || fileManager.fileExists(atPath: shim.path) else { continue }
+            let aliasName = "\(Self.nvngxStem).\(ext)"
+            if aliasIsCurrent(shim, dir.appendingPathComponent(aliasName)) { continue }
+            try replace(shim, in: dir, as: aliasName)
+        }
+    }
+
+    /// Whether `alias` already mirrors `source` — comparing symlink TARGETS for a symlink (a recreated link
+    /// is never byte-comparable) and contents for a regular file. `source` is known to exist; a missing
+    /// `alias` compares unequal, which is the "not aliased yet" answer.
+    private func aliasIsCurrent(_ source: URL, _ alias: URL) -> Bool {
+        if isSymlink(source) {
+            guard let target = try? fileManager.destinationOfSymbolicLink(atPath: source.path) else {
+                return false
+            }
+            return (try? fileManager.destinationOfSymbolicLink(atPath: alias.path)) == target
+        }
+        return fileManager.contentsEqual(atPath: source.path, andPath: alias.path)
+    }
+
+    /// Seed GPTK's NVIDIA shims into the game **prefix** so wine can resolve them by name — the exact trap
+    /// `installDXMTPrefixLoaders` documents for `winemetal`, and for the same reason.
+    ///
+    /// `wineboot` creates a `system32` fakedll placeholder only for names Wine itself knows. Silo's bottles
+    /// are booted against the BASE runtime, which ships neither `nvapi64` nor `nvngx` (they arrive later,
+    /// when `overlayGPTK` runs at first launch) — so neither name resolves on the Windows search path and
+    /// the `=b` override never gets the chance to load the builtin. CrossOver's own Steam bottle carries
+    /// 1 KB fakedll stubs for both, which is how the same modules resolve there.
+    ///
+    /// GPTK is 64-bit only (Apple ships no i386 D3DMetal), so `system32` alone — no `syswow64` counterpart,
+    /// unlike the dual-ABI DXMT/DXVK seeds. `nvngx` is taken from the `-on-metalfx` shim and written under
+    /// its plain name, matching `activateNVNGX`. Idempotent.
+    ///
+    /// - Parameters:
+    ///   - prefix: the game's Wine prefix (its `drive_c/windows/system32` is seeded).
+    ///   - gptkLibDir: GPTK's PE module dir (`<gptk>/lib/wine/x86_64-windows`).
+    public func installGPTKPrefixLoaders(prefix: URL, gptkLibDir: URL) throws {
+        guard fileManager.fileExists(atPath: gptkLibDir.path) else { throw LinkError.sourceMissing(gptkLibDir) }
+        let system32 = prefix.appendingPathComponent("drive_c/windows/system32")
+        // source file name → the name it must resolve under in the prefix.
+        let seeds = [
+            "nvapi64.dll": "nvapi64.dll",
+            "\(Self.nvngxShimStem).dll": "\(Self.nvngxStem).dll",
+        ]
+        for (sourceName, destName) in seeds {
+            let src = gptkLibDir.appendingPathComponent(sourceName)
+            guard fileManager.fileExists(atPath: src.path) else { continue }   // this GPTK doesn't ship it
+            let dst = system32.appendingPathComponent(destName)
+            if fileManager.contentsEqual(atPath: src.path, andPath: dst.path) { continue }   // already placed
+            try fileManager.createDirectory(at: system32, withIntermediateDirectories: true)
+            if fileManager.fileExists(atPath: dst.path) { try fileManager.removeItem(at: dst) }
+            try fileManager.copyItem(at: src, to: dst)
+        }
     }
 
     // MARK: - DXMT overlay
@@ -310,7 +395,12 @@ public struct GraphicsLinker: Sendable {
     /// the wine tree rather than collapsing into a standalone dylib whose `@rpath` framework lookup breaks.
     /// Regular files and directories (e.g. `D3DMetal.framework`) are copied recursively.
     private func replace(_ src: URL, in dir: URL) throws {
-        let dest = dir.appendingPathComponent(src.lastPathComponent)
+        try replace(src, in: dir, as: src.lastPathComponent)
+    }
+
+    /// `replace`, but landing under `name` instead of the source's own — the aliasing `activateNVNGX` needs.
+    private func replace(_ src: URL, in dir: URL, as name: String) throws {
+        let dest = dir.appendingPathComponent(name)
         if fileManager.fileExists(atPath: dest.path) || isSymlink(dest) { try fileManager.removeItem(at: dest) }
         if isSymlink(src) {
             let target = try fileManager.destinationOfSymbolicLink(atPath: src.path)
