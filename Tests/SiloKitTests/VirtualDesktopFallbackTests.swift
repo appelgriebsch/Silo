@@ -75,6 +75,46 @@ struct VirtualDesktopFallbackTests {
     }
 }
 
+/// The points→pixels conversion is the whole reason this type exists: wine sizes its desktop window in real
+/// pixels, so handing it `NSScreen.frame` unscaled would give a Retina game a quarter of the panel.
+@Suite("Desktop geometry resolution")
+struct DesktopGeometryTests {
+
+    @Test("a Retina panel resolves to its BACKING pixels, not its point size")
+    func retinaScales() {
+        // The dev box's own panel: 1512x982 points at 2x is 3024x1964 real pixels.
+        #expect(DesktopGeometry.geometry(points: CGSize(width: 1512, height: 982), scale: 2) == "3024x1964")
+    }
+
+    @Test("a 1x display passes through unscaled")
+    func nonRetinaPassesThrough() {
+        // A 1x external panel (the display in the 1440x900-cap report) must not be doubled.
+        #expect(DesktopGeometry.geometry(points: CGSize(width: 2560, height: 1440), scale: 1) == "2560x1440")
+    }
+
+    @Test("a fractional scale rounds to whole pixels — wine's geometry takes integers only")
+    func fractionalScaleRounds() {
+        #expect(DesktopGeometry.geometry(points: CGSize(width: 1440, height: 900), scale: 1.5)
+            == "2160x1350")
+        // A scaled-mode panel whose product isn't whole still yields integers, never "1707.5x960".
+        #expect(DesktopGeometry.geometry(points: CGSize(width: 1138, height: 640), scale: 1.5)
+            == "1707x960")
+    }
+
+    @Test("a screen reporting nothing usable is nil — the caller's fallback, not a 0x0 desktop")
+    func nonPositiveIsNil() {
+        #expect(DesktopGeometry.geometry(points: .zero, scale: 2) == nil)
+        #expect(DesktopGeometry.geometry(points: CGSize(width: 1512, height: 982), scale: 0) == nil)
+        #expect(DesktopGeometry.geometry(points: CGSize(width: -1512, height: 982), scale: 2) == nil)
+    }
+
+    @MainActor
+    @Test("no screen at all resolves to nil, so the launch falls back instead of throwing")
+    func noScreenIsNil() {
+        #expect(DesktopGeometry.mainScreen(nil) == nil)
+    }
+}
+
 /// Silo's launch logs APPEND across runs. Reading the whole file would re-detect a one-off failure forever,
 /// so the check must look only at the most recent launch.
 @Suite("Launch log sectioning")

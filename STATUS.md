@@ -43,6 +43,20 @@
     down. The desktop is also renamed `SiloGame`: `explorer` scopes a desktop by NAME, so a game sharing the
     client's `Silo` desktop would join that window and inherit its size — making the geometry a no-op in the
     shared bottle, the one place it matters most.
+    - **Review follow-up (2026-08-17):** `NSScreen.main` is the screen holding the KEY WINDOW and is nil when
+      Silo owns none — precisely the `silo://` shortcut path, where the game would then have taken the
+      1920x1080 fallback on a 3024x1964 panel. It now falls through to the primary display. The points→pixels
+      arithmetic split into a pure `DesktopGeometry.geometry(points:scale:)` so it is testable at all: an
+      `NSScreen` can't be constructed, so the injectable-screen parameter could only ever pin the nil case.
+      Five tests added (525 green).
+
+- **📮 [PR #5](https://github.com/mikaelhug/Silo/pull/5) (BananaStems) — CLOSED as fixed by the above.** An
+  outside report that the 1440x900 cap was real on hardware (M2, external 2560x1440, 7 Days to Die logging
+  `current screen 1440 x 900`). Its fix resized `SteamBottle.desktopGeometry` itself, which is the *client's*
+  CEF workaround, and read the size via `CGDisplayPixelsWide/High` — those return the display mode's **point**
+  size (measured here: 1512x982 on a 3024x1964 panel), so it would have capped Retina games at a quarter of
+  the display. It only looked right on the reporter's 1x external panel. Kept as the record of why the
+  points-vs-pixels distinction in `DesktopGeometry` is load-bearing.
 
 - **🧱 DirectX 9 on Source-engine titles is blocked UPSTREAM, not by Silo (2026-08-04, measured).** After the
   DXVK runtime was reinstalled (the shipped one carried a STOCK MoltenVK — see below), DXVK finally creates
