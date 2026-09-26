@@ -104,3 +104,48 @@ struct RosettaTests {
         #expect(fake.invocations.map(\.executable.path) == ["/usr/sbin/softwareupdate"])
     }
 }
+
+@MainActor
+@Suite("AppEnvironment Rosetta prompt")
+struct AppEnvironmentRosettaTests {
+
+    private func make(_ tmp: TempDir, runner: FakeProcessRunner, installed: Bool) -> AppEnvironment {
+        AppEnvironment(paths: AppPaths(supportDir: tmp.url.appendingPathComponent("Silo")), runner: runner,
+                       updater: Updater(repo: "x/y", session: FakeURLProtocol.makeSession()),
+                       rosettaInstalled: { installed })
+    }
+
+    @Test("Rosetta present → no onboarding step, nothing to install")
+    func present() throws {
+        let tmp = try TempDir(); defer { tmp.cleanup() }
+        let env = make(tmp, runner: FakeProcessRunner(), installed: true)
+        #expect(env.rosettaReady)
+        #expect(!env.rosettaWasMissing)
+    }
+
+    @Test("Rosetta missing → install flips ready (even if the probe still disagrees) and keeps the step")
+    func installSucceeds() async throws {
+        let tmp = try TempDir(); defer { tmp.cleanup() }
+        let runner = FakeProcessRunner()
+        let env = make(tmp, runner: runner, installed: false)
+        #expect(!env.rosettaReady && env.rosettaWasMissing)
+
+        await env.installRosetta()
+        #expect(env.rosettaReady)                  // fail-open: a successful install is trusted over the probe
+        #expect(env.rosettaWasMissing)             // the step stays on screen, ticked
+        #expect(env.rosettaMessage == nil)
+        #expect(runner.invocations.map(\.executable.path) == ["/usr/sbin/softwareupdate"])
+    }
+
+    @Test("A failed install stays not-ready and surfaces the reason")
+    func installFails() async throws {
+        let tmp = try TempDir(); defer { tmp.cleanup() }
+        let runner = FakeProcessRunner()
+        runner.queueResult(ProcessResult(exitCode: 1, standardError: Data("No network".utf8)))
+        let env = make(tmp, runner: runner, installed: false)
+
+        await env.installRosetta()
+        #expect(!env.rosettaReady)
+        #expect(env.rosettaMessage == "Couldn't install Rosetta 2: No network")
+    }
+}

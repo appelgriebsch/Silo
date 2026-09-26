@@ -9,6 +9,9 @@
   - `Rosetta` (`Process/Rosetta.swift`): probe + `softwareupdate --install-rosetta --agree-to-license` (verified
     on-device: needs NO admin). `SteamBottleViewModel.setUp` installs it first ("Installing Rosetta 2…"),
     best-effort/fail-open. `SystemProcessRunner` maps `EBADARCH` → "Rosetta 2 isn't installed."
+  - **Prompted, not just silent:** onboarding gains an "Install Rosetta 2" step (only when it was missing at
+    launch; locks Set up until done), and a set-up library shows a "Rosetta 2 is required" alert (Install /
+    Not Now, asks again next launch). State lives on `AppEnvironment` (`rosettaReady`, `installRosetta()`).
   - ⚠️ **macOS 27 moved `oahd` to the sealed volume (`/usr/libexec/rosetta/oahd`, present even WITHOUT
     Rosetta)** — the classic `/Library/Apple/usr/libexec/oahd` probe is gone. The probe keys off the package
     payload `/Library/Apple/usr/libexec/oah/libRosettaRuntime` (legacy path kept for ≤26).
