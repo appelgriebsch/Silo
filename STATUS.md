@@ -3,6 +3,19 @@
 > Updated every iteration. `CLAUDE.md` is the contract; this is the state.
 
 ## Now
+- **🩹 [Issue #7](https://github.com/mikaelhug/Silo/issues/7) — "Setup failed: Bad CPU type in executable" on macOS 27 (2026-09-26; 535 tests green, zero warnings).**
+  Root cause: **Rosetta 2 not installed** (a clean macOS 27 has none), so every x86_64 wine spawn failed with
+  `EBADARCH`. Not an SDK problem — rebuilding against SDK 27 alone changes nothing (the wine tree is x86_64).
+  - `Rosetta` (`Process/Rosetta.swift`): probe + `softwareupdate --install-rosetta --agree-to-license` (verified
+    on-device: needs NO admin). `SteamBottleViewModel.setUp` installs it first ("Installing Rosetta 2…"),
+    best-effort/fail-open. `SystemProcessRunner` maps `EBADARCH` → "Rosetta 2 isn't installed."
+  - ⚠️ **macOS 27 moved `oahd` to the sealed volume (`/usr/libexec/rosetta/oahd`, present even WITHOUT
+    Rosetta)** — the classic `/Library/Apple/usr/libexec/oahd` probe is gone. The probe keys off the package
+    payload `/Library/Apple/usr/libexec/oah/libRosettaRuntime` (legacy path kept for ≤26).
+  - Toolchain: CI runs on the `xcode-27` runner (macOS 27, `Xcode_${XCODE_VERSION}.app`); local builds pin the
+    SDK via `Scripts/sdk-env.sh` (`SDKROOT` from `MACOS_SDK_VERSION`). Both live in `versions.env`. Swift 6.4
+    surfaced two implicit-strong-capture warnings (GraphicsFallback, LogViewerView) — fixed.
+
 - **🔧 Three fixes ported from Dino0005' fork of Silo (2026-08-05; 520 tests green, zero warnings).** The
   fork (branched 2026-07-15, so it predates the whole DXVK backend) was reviewed commit by commit; most of it
   was rejected — an updater repointed at the fork, a script that lifts Wine out of an installed CrossOver.app
