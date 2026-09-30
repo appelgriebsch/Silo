@@ -42,12 +42,12 @@ struct VirtualDesktopFallbackTests {
     }
 
     /// `explorer` scopes a desktop by NAME. If a game reused the Steam client's `Silo` desktop it would
-    /// join that existing window and silently inherit its 1440x900 — in the shared bottle, where the client
-    /// is always up, that would make the resolved geometry below a no-op.
+    /// join that existing window and silently inherit the client's size. In the shared bottle, where the
+    /// client is always up, that would make the resolved geometry below a no-op.
     @Test("a game's desktop is a DIFFERENT desktop from the Steam client's, so it can have its own size")
     func gameDesktopIsNotTheSteamClientDesktop() {
         #expect(LaunchOrchestrator.gameDesktopName != "Silo")
-        #expect(LaunchOrchestrator.fallbackGameDesktopGeometry != SteamBottle.desktopGeometry)
+        #expect(LaunchOrchestrator.fallbackGameDesktopGeometry != SteamBottle.fallbackDesktopGeometry)
     }
 
     @Test("the real screen's pixel geometry is what the desktop is sized to, with a sane fallback")

@@ -3,6 +3,30 @@
 > Updated every iteration. `CLAUDE.md` is the contract; this is the state.
 
 ## Now
+- **🐛 [PR #8](https://github.com/mikaelhug/Silo/pull/8) (bryceeppler) — the Steam client's 1440x900 virtual desktop capped
+  every co-resident game at 1440x900 (merged 2026-09-30; 539 tests green, zero warnings).** While the client's `explorer /desktop=Silo,<size>` is up, wine reports that desktop as
+  the display to every process in the shared bottle — so a ROOTLESS game (the default path) logged
+  `desktop 1440x900` on a 2560x1440 panel and its resolution list stopped at 1440x900. The fixed
+  `SteamBottle.desktopGeometry` is now `fallbackDesktopGeometry` (no-screen only), and `SteamClientSession`
+  sizes the client's desktop to `DesktopGeometry.mainScreen()` — the same helper game desktops already use
+  (injectable as `screenGeometry` so the regression test pins a screen without a display). Verified on-device
+  (M4 Pro, 2560x1440 panel, Graveyard Keeper 2 / Unity 6, GPTK 4.0b2): before, `desktop 1440x900` and no mode
+  above 1440x900; after, Silo launched the client with `/desktop=Silo,2560x1440`, the game offered
+  `2560x1440`, and the CEF UI still painted.
+  - **Why this isn't covered by `aec535a` (#5):** the `SiloGame` desktop only applies once a game has asked
+    for an unavailable mode (`needsVirtualDesktop`); the default rootless launch still inherits the client's
+    desktop, which is what 0.4.10 capped.
+  - **Pixels, not points, checked on a 2x panel with Retina mode off:** a `5120x2880` and a `2560x1440`
+    client desktop behaved identically — the game's window was exactly the screen (2560x1440 points) and its
+    largest mode was 2560x1440, because wine never reports a mode beyond the real screen. So backing pixels
+    (right with Retina mode on) cost nothing with it off; the Steam window stayed 1280x800 either way.
+  - **Re-verified in review (M4 Pro MacBook, 1512x982pt @2x + 3440x1440 external, wine-cx-26.3.0):** a rootless
+    `wmic` in the same prefix read 1440x900 while a `Silo,1440x900` desktop was up (1512x982 without it). Wine
+    clamps a desktop ≥ the primary screen down to the screen — 3024x1964, 3440x1440 and 1920x1080 all read as
+    1512x982 with Retina mode off; with it on, the old size capped at 2880x1800. The real bottle client launched
+    through `SteamClientSession` with `/desktop=Silo,3024x1964` and painted, its 700x440 login window centered.
+  - Nit left as-is: `mainScreen()` follows the KEY window's screen while wine's display is the menu-bar screen;
+    only a smaller 1x secondary screen could still cap below the primary (same as the `SiloGame` desktop).
 - **🩹 [Issue #7](https://github.com/mikaelhug/Silo/issues/7) — "Setup failed: Bad CPU type in executable" on macOS 27 (2026-09-26; 535 tests green, zero warnings).**
   Root cause: **Rosetta 2 not installed** (a clean macOS 27 has none), so every x86_64 wine spawn failed with
   `EBADARCH`. Not an SDK problem — rebuilding against SDK 27 alone changes nothing (the wine tree is x86_64).
